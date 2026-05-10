@@ -14,7 +14,8 @@ RUN apk add --no-cache \
     elfutils-dev \
     openssl-dev \
     libuv-dev \
-    argon2-dev
+    argon2-dev \
+    perl
 
 # Download and compile static OpenSSL
 RUN cd /tmp && \
