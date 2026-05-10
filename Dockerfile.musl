@@ -45,6 +45,7 @@ COPY . .
 
 ENV OPENSSL_DIR=/install
 ENV LIBUV_DIR=/install
+ENV XMRIG_DEPS=/install
 
 RUN cmake -B build \
     -DCMAKE_BUILD_TYPE=Release \
