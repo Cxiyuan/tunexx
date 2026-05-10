@@ -1,0 +1,63 @@
+name: Build XMRig (Linux x86_64 static)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    container:
+      image: xmrig/amd64-linux-musl:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apk add --no-cache cmake make gcc g++ musl-dev linux-headers elfutils-dev libuv-dev openssl-dev
+
+      - name: Configure CMake
+        run: |
+          cmake . \
+            -B build \
+            -DCMAKE_CXX_FLAGS="-static -static-libgcc -static-libstdc++" \
+            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++" \
+            -DCMAKE_PREFIX_PATH=/usr/local \
+            -DWITH_STATIC=ON \
+            -DWITH_EMBEDDED_CONFIG=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Build XMRig
+        run: |
+          cmake --build build --target xmrig -- -j$(nproc)
+
+      - name: Strip binary
+        run: |
+          strip -s build/xmrig 2>/dev/null || true
+
+      - name: Verify static binary
+        run: |
+          file build/xmrig
+          ldd build/xmrig 2>&1 | grep -v "not a dynamic executable" || echo "Static binary verified"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xmrig-linux-x86_64-static
+          path: build/xmrig
+          retention-days: 30
+
+      - name: Upload release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: build/xmrig
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
