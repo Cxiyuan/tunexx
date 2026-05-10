@@ -15,9 +15,6 @@ RUN apk add --no-cache \
     perl \
     argon2-dev
 
-# Use Alpine's libuv (static dev package) and build OpenSSL from source
-RUN apk add --no-cache libuv-dev
-
 # Download and compile static OpenSSL
 RUN cd /tmp && \
     wget -q https://www.openssl.org/source/openssl-3.2.1.tar.gz && \
@@ -27,22 +24,37 @@ RUN cd /tmp && \
     make -j$(nproc) && \
     make install_sw
 
+# Download and compile static libuv
+RUN cd /tmp && \
+    wget --no-check-certificate -q https://github.com/libuv/libuv/archive/refs/tags/v1.48.0.tar.gz -O libuv.tar.gz && \
+    tar -xzf libuv.tar.gz && \
+    cd libuv-1.48.0 && \
+    mkdir build && cd build && \
+    cmake .. \
+        -DCMAKE_INSTALL_PREFIX=/install \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLIBUV_BUILD_SHARED=OFF \
+        -DLIBUV_BUILD_TESTS=OFF \
+        -DCMAKE_C_FLAGS="-fPIC" && \
+    make -j$(nproc) && \
+    make install
+
 # Copy and build XMRig
 WORKDIR /xmrig
 COPY . .
 
 ENV OPENSSL_DIR=/install
-ENV LIBUV_DIR=/usr
+ENV LIBUV_DIR=/install
 
 RUN cmake -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER=gcc \
     -DCMAKE_CXX_COMPILER=g++ \
     -DCMAKE_EXE_LINKER_FLAGS="-static" \
-    -DCMAKE_C_FLAGS="-I/install/include -I/usr/include -static -fPIC" \
-    -DCMAKE_CXX_FLAGS="-I/install/include -I/usr/include -static -fPIC" \
+    -DCMAKE_C_FLAGS="-I/install/include -static -fPIC" \
+    -DCMAKE_CXX_FLAGS="-I/install/include -static -fPIC" \
     -DOPENSSL_ROOT_DIR=/install \
-    -DLIBUV_ROOT_DIR=/usr \
+    -DLIBUV_ROOT_DIR=/install \
     -DWITH_EMBEDDED_CONFIG=ON \
     -DWITH_STATIC=ON \
     -DWITH_HWLOC=OFF && \
