@@ -1,0 +1,80 @@
+# Multi-stage build for static XMRig binary using Alpine + musl
+
+# Stage 1: Build dependencies
+FROM alpine:3.19 AS deps
+RUN apk add --no-cache \
+    cmake \
+    make \
+    g++ \
+    gcc \
+    wget \
+    curl \
+    pkgconf \
+    linux-headers \
+    elfutils-dev \
+    openssl-dev \
+    libuv-dev \
+    argon2-dev
+
+# Stage 2: Download and compile static OpenSSL
+FROM deps AS openssl
+RUN cd /tmp && \
+    wget -q https://www.openssl.org/source/openssl-3.2.1.tar.gz && \
+    tar -xzf openssl-3.2.1.tar.gz && \
+    cd openssl-3.2.1 && \
+    ./Configure --prefix=/install linux-x86_64 no-shared no-dso enable-legacy -fPIC && \
+    make -j$(nproc) && \
+    make install_sw
+
+# Stage 3: Download and compile static libuv
+FROM deps AS libuv
+RUN cd /tmp && \
+    wget -q https://github.com/libuv/libuv/releases/download/v1.48.0/libuv-v1.48.0.tar.gz && \
+    tar -xzf libuv-v1.48.0.tar.gz && \
+    cd libuv-v1.48.0 && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/install \
+             -DCMAKE_BUILD_TYPE=Release \
+             -DLIBUV_BUILD_SHARED=OFF \
+             -DLIBUV_BUILD_TESTS=OFF \
+             -DCMAKE_C_FLAGS="-fPIC" && \
+    make -j$(nproc) && \
+    make install
+
+# Stage 4: Build XMRig (static target)
+FROM deps AS builder
+COPY --from=openssl /install /install
+COPY --from=libuv /install /install
+
+ENV OPENSSL_DIR=/install
+ENV LIBUV_DIR=/install
+ENV CFLAGS="-I/install/include -fPIC"
+ENV CXXFLAGS="-I/install/include -fPIC"
+ENV LDFLAGS="-L/install/lib -static"
+ENV CC=gcc
+ENV CXX=g++
+
+WORKDIR /xmrig
+COPY . .
+
+RUN cmake -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER=gcc \
+    -DCMAKE_CXX_COMPILER=g++ \
+    -DCMAKE_EXE_LINKER_FLAGS="-static" \
+    -DCMAKE_C_FLAGS="-I/install/include -static -fPIC" \
+    -DCMAKE_CXX_FLAGS="-I/install/include -static -fPIC" \
+    -DOPENSSL_ROOT_DIR=/install \
+    -DLIBUV_ROOT_DIR=/install \
+    -DWITH_EMBEDDED_CONFIG=ON \
+    -DWITH_STATIC=ON \
+    -DWITH_HWLOC=OFF \
+    -DHWLOC=OFF && \
+    cmake --build build --target xmrig -- -j$(nproc)
+
+# Stage 5: Create runtime image with binary only
+FROM alpine:3.19 AS static
+RUN apk add --no-cache --purge .build-dependencies 2>/dev/null || true
+COPY --from=builder /xmrig/build/xmrig /xmrig-static
+RUN chmod +x /xmrig-static
+ENTRYPOINT ["/xmrig-static"]

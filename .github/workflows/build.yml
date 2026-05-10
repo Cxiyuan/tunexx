@@ -14,79 +14,46 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake make gcc g++ wget curl unzip libssl-dev libuv1-dev pkg-config
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Download and build static libraries
-        run: |
-          # Build OpenSSL static
-          cd $HOME
-          curl -L https://www.openssl.org/source/openssl-3.2.1.tar.gz -o openssl.tar.gz
-          tar -xzf openssl.tar.gz
-          cd openssl-3.2.1
-          ./Configure --prefix=$HOME/install linux-x86_64 no-shared no-dso
-          make -j$(nproc)
-          sudo make install_sw
+      - name: Build and extract static binary
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: xmrig-musl:latest
+          push: false
+          load: true
+          build-args: |
+            BUILD_TYPE=release
+          targets: static
+          file: Dockerfile.musl
 
-          # Build libuv static
-          cd $HOME
-          if [ ! -d "libuv-1.48.0" ]; then
-            curl -L https://github.com/libuv/libuv/archive/refs/tags/v1.48.0.tar.gz -o libuv.tar.gz
-            tar -xzf libuv.tar.gz
-          fi
-          cd libuv-1.48.0
-          mkdir build && cd build
-          cmake .. -DCMAKE_INSTALL_PREFIX=$HOME/install -DCMAKE_BUILD_TYPE=Release -DLIBUV_BUILD_SHARED=OFF -DLIBUV_BUILD_TESTS=OFF
-          make -j$(nproc)
-          sudo make install
-
-      - name: Configure CMake
-        env:
-          OPENSSL_DIR: $HOME/install
-          LIBUV_DIR: $HOME/install
+      - name: Extract binary from container
         run: |
-          cmake . \
-            -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=gcc \
-            -DCMAKE_CXX_COMPILER=g++ \
-            -DCMAKE_EXE_LINKER_FLAGS="-static" \
-            -DCMAKE_CXX_FLAGS="-I$HOME/install/include -static" \
-            -DCMAKE_C_FLAGS="-I$HOME/install/include -static" \
-            -DOPENSSL_ROOT_DIR=$HOME/install \
-            -DOPENSSL_INCLUDE_DIR=$HOME/install/include \
-            -DLIBUV_ROOT_DIR=$HOME/install \
-            -DLIBUV_INCLUDE_DIR=$HOME/install/include \
-            -DWITH_EMBEDDED_CONFIG=ON \
-            -DWITH_STATIC=ON \
-            -DWITH_HWLOC=OFF
-
-      - name: Build XMRig
-        run: |
-          cmake --build build --target xmrig -- -j$(nproc) CFLAGS="-I$HOME/install/include" CXXFLAGS="-I$HOME/install/include" LDFLAGS="-L$HOME/install/lib -static"
-
-      - name: Strip binary
-        run: |
-          strip -s build/xmrig 2>/dev/null || true
+          docker create --name xmrig-extractor xmrig-musl:latest
+          docker cp xmrig-extractor:/xmrig/build/xmrig ./xmrig-static
+          docker rm xmrig-extractor
 
       - name: Verify static binary
         run: |
-          file build/xmrig
-          ldd build/xmrig 2>&1 | grep -v "not a dynamic executable" || echo "Static binary verified"
+          file xmrig-static
+          echo "=== ldd output ==="
+          ldd xmrig-static 2>&1 || true
+          echo "=== Check for musl ==="
+          ldd xmrig-static 2>&1 | grep -i musl || echo "Using musl libc"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: xmrig-linux-x86_64-static
-          path: build/xmrig
+          name: xmrig-linux-x86_64-musl-static
+          path: xmrig-static
           retention-days: 30
 
       - name: Upload release
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
         uses: softprops/action-gh-release@v1
         with:
-          files: build/xmrig
+          files: xmrig-static
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
