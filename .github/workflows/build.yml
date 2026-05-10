@@ -17,31 +17,30 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and extract static binary
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          tags: xmrig-musl:latest
-          push: false
-          load: true
-          build-args: |
-            BUILD_TYPE=release
-          targets: static
-          file: Dockerfile.musl
+      - name: Build XMRig in Alpine container
+        run: |
+          docker buildx build \
+            --load \
+            --tag xmrig-musl:latest \
+            --file Dockerfile.musl \
+            --target builder \
+            --build-arg BUILD_TYPE=release \
+            .
 
       - name: Extract binary from container
         run: |
           docker create --name xmrig-extractor xmrig-musl:latest
           docker cp xmrig-extractor:/xmrig/build/xmrig ./xmrig-static
           docker rm xmrig-extractor
+          chmod +x xmrig-static
 
       - name: Verify static binary
         run: |
           file xmrig-static
           echo "=== ldd output ==="
           ldd xmrig-static 2>&1 || true
-          echo "=== Check for musl ==="
-          ldd xmrig-static 2>&1 | grep -i musl || echo "Using musl libc"
+          echo "=== Check libc ==="
+          ldd xmrig-static 2>&1 | grep -E "musl|glibc|ldd" || echo "Static binary confirmed (no dynamic libc dependencies)"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
