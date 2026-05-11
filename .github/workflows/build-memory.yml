@@ -51,38 +51,54 @@ jobs:
 
       - name: Create memory-only launcher script
         run: |
-          # Create compressed base64 payload
-          BASE64_DATA=$(gzip -9 -c tupe | base64 -w0)
-
-          cat > tupe_run.sh << 'SCRIPT'
+          # Create wrapper script header
+          cat > tupe_run.sh << 'HEADER'
           #!/bin/sh
-          # Memory-only execution: no disk I/O for the binary
-          # Usage: ./tupe_run.sh
+          # Memory-only execution wrapper
+          # Extracted binary runs in /dev/shm (tmpfs)
 
-          PAYLOAD='PAYLOAD_PLACEHOLDER'
+          HEADER_SIZE=HEADER_PLACEHOLDER
 
           cleanup() {
             rm -f /dev/shm/tupe 2>/dev/null
           }
-
           trap cleanup EXIT
 
-          # Extract to tmpfs (memory filesystem), not disk
-          echo "$PAYLOAD" | base64 -d | gunzip > /dev/shm/tupe
+          # Extract to tmpfs (memory), execute, then cleanup
+          tail -c $HEADER_SIZE "$0" | head -c -1 | base64 -d | gunzip > /dev/shm/tupe
           chmod 700 /dev/shm/tupe
-
-          # Execute from memory
           /dev/shm/tupe "$@"
-
           exit $?
-          SCRIPT
+          HEADER
 
-          # Replace placeholder with actual base64 data
-          sed -i "s/PAYLOAD_PLACEHOLDER/${BASE64_DATA}/" tupe_run.sh
+          # Get script header size
+          HEADER_LINE_COUNT=$(grep -n "HEADER_PLACEHOLDER" tupe_run.sh | cut -d: -f1)
+          SCRIPT_HEADER=$(head -n $HEADER_LINE_COUNT tupe_run.sh)
+          echo "$SCRIPT_HEADER" > tupe_run.sh
+
+          # Count remaining lines (script body only, before payload)
+          SCRIPT_LINES_BEFORE_PAYLOAD=$(wc -l < tupe_run.sh)
+
+          # Create payload (base64 of gzip compressed binary)
+          gzip -9 -c tupe | base64 -w0 > tupe_payload.b64
+
+          # Append payload
+          cat tupe_payload.b64 >> tupe_run.sh
+
+          # Replace placeholder with actual header size offset
+          # Calculate: file size - payload size = header size
+          TOTAL_SIZE=$(wc -c < tupe_run.sh)
+          PAYLOAD_SIZE=$(wc -c < tupe_payload.b64)
+          HEADER_BYTE_SIZE=$((TOTAL_SIZE - PAYLOAD_SIZE))
+          sed -i "s/HEADER_PLACEHOLDER/$HEADER_BYTE_SIZE/" tupe_run.sh
+
           chmod +x tupe_run.sh
+          rm -f tupe_payload.b64
 
-          # Show final size
-          ls -lh tupe_run.sh
+          echo "=== Final sizes ==="
+          ls -lh tupe tupe_run.sh
+          echo ""
+          echo "tupe_run.sh is self-contained with UPX-compressed binary embedded"
 
       - name: Test execution in Docker
         run: |
@@ -90,11 +106,11 @@ jobs:
             apk add --no-cache bash coreutils >/dev/null 2>&1
             cd /app
             chmod +x tupe_run.sh tupe
-            echo "=== Testing compressed tupe (UPX) ==="
-            timeout 5 ./tupe --help 2>&1 | head -5 || echo "(timeout or no --help)"
+            echo "=== Testing tupe (UPX) ==="
+            timeout 5 ./tupe --version 2>&1 | head -3 || echo "(no --version)"
             echo ""
             echo "=== Testing tupe_run.sh (memory-only) ==="
-            timeout 5 ./tupe_run.sh --version 2>&1 | head -5 || echo "(timeout or no --version)"
+            timeout 5 ./tupe_run.sh --version 2>&1 | head -3 || echo "(failed)"
           '
 
       - name: Upload artifacts
