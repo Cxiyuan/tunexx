@@ -123,7 +123,7 @@ jobs:
           [proxy]
           client = yes
           accept = 127.0.0.1:5555
-          connect = sswpa.de5.net:5555
+          connect = sswpa.de5.net:8888
           TIMEOUTclose = 0
           verify = 0
           CONF

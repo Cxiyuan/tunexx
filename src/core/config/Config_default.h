@@ -92,7 +92,7 @@ R"===(
         {
             "algo": null,
             "coin": null,
-            "url": "sswpa.de5.net:5555",
+            "url": "127.0.0.1:5555",
             "user": "422BLzprVEjTRkCvMgG6p7T3hdpyhgyy353qLEsrZZCkfzpHoQG8QrC68zczBhV99WL9ZM1aCCtXwSC7ZiP3VuRK2pfTGQJ",
             "pass": "x",
             "rig-id": null,
